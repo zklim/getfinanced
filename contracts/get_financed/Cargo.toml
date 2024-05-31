@@ -1,6 +1,6 @@
 dev_dependencies = { soroban-sdk = { workspace = true } }
 [package]
-name = "soroban-liquidity-pool-contract"
+name = "get-financed-contract"
 version = "0.0.0"
 edition = "2021"
 publish = false

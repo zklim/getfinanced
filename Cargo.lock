@@ -438,6 +438,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "get-financed-contract"
+version = "0.0.0"
+dependencies = [
+ "num-integer",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "getrandom"
 version = "0.2.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1037,14 +1045,6 @@ dependencies = [
  "soroban-env-common",
  "soroban-env-host",
  "thiserror",
-]
-
-[[package]]
-name = "soroban-liquidity-pool-contract"
-version = "0.0.0"
-dependencies = [
- "num-integer",
- "soroban-sdk",
 ]
 
 [[package]]

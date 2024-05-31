@@ -2,17 +2,18 @@
 
 mod test;
 mod token;
+mod admin;
 
 use num_integer::Roots;
 use soroban_sdk::{
-    contract, contractimpl, contractmeta, Address, BytesN, ConversionError, Env, IntoVal,
-    TryFromVal, Val, Vec
+    contract, contractimpl, contracttype, symbol_short, Address, BytesN, ConversionError, Env, IntoVal,
+    TryFromVal, Val, Vec, Symbol
 };
 use token::create_contract;
-use crate::admin::{has_administrator, read_administrator, write_administrator};
+use admin::{has_administrator, read_administrator, write_administrator};
 
-pub(crate) const FEES_PORTION_FOR_INSURANCE: u32 = 10;
-#[contracttype]
+pub(crate) const FEES_PORTION_FOR_INSURANCE: i128 = 10;
+
 #[derive(Clone, Copy)]
 #[repr(u32)]
 pub enum DataKey {
@@ -40,10 +41,18 @@ pub struct LoanDetails {
     pub fee_rate: i128,
     pub invoice_amount: i128,
     pub loan_amount: i128,
-    pub repayment_date: i128,
+    pub repayment_date: u64,
     pub approved: bool,
     pub released: bool,
     pub repaid: bool,
+}
+
+impl TryFromVal<Env, DataKey> for Val {
+    type Error = ConversionError;
+
+    fn try_from_val(_env: &Env, v: &DataKey) -> Result<Self, Self::Error> {
+        Ok((*v as u32).into())
+    }
 }
 
 fn get_usdc(e: &Env) -> Address {
@@ -201,11 +210,11 @@ impl GetFinanced {
         e.storage().instance().set(&AdminDataKey::WHITELISTED(address), &true);
     }
 
-    fn request_loan(e: Env, from: Address, invoice_amount: i128, inv_no: u32, fee_rate: i128, repayment_date: i128) {
+    fn request_loan(e: Env, from: Address, invoice_amount: i128, inv_no: u32, fee_rate: i128, repayment_date: u64) {
         // Borrower needs to authorize the loan request
         from.require_auth();
         // Check if the borrower is whitelisted
-        let whitelist = e.storage().instance().get(&AdminDataKey::WHITELISTED(from)).unwrap();
+        let whitelist: bool = e.storage().instance().get(&AdminDataKey::WHITELISTED(from.clone())).unwrap();
         if !whitelist {
             panic!("borrower is not whitelisted");
         }
@@ -218,29 +227,30 @@ impl GetFinanced {
             repayment_date,
             approved: false,
             released: false,
+            repaid: false,
         };
 
         e.storage().instance().set(&AdminDataKey::INVNO(inv_no), &loan);
 
-        env.events()
-            .publish((AdminDataKey::INVNO(inv_no), symbol_short!("loan_request")), loan);
+        e.events()
+            .publish((AdminDataKey::INVNO(inv_no), Symbol::new(&e, "loan_request")), loan);
     }
 
     fn approve_loan(e: Env, inv_no: u32) {
         let admin = read_administrator(&e);
         admin.require_auth();
 
-        let mut loan = e.storage().instance().get(&AdminDataKey::INVNO(inv_no)).unwrap();
+        let mut loan: LoanDetails = e.storage().instance().get(&AdminDataKey::INVNO(inv_no)).unwrap();
         loan.approved = true;
 
         e.storage().instance().set(&AdminDataKey::INVNO(inv_no), &loan);
 
-        env.events()
-            .publish((AdminDataKey::INVNO(inv_no), symbol_short!("loan_approved")), loan);
+        e.events()
+            .publish((AdminDataKey::INVNO(inv_no), Symbol::new(&e, "loan_approved")), loan);
     }
 
     fn release_loan(e: Env, inv_no: u32) {
-        let mut loan = e.storage().instance().get(&AdminDataKey::INVNO(inv_no)).unwrap();
+        let mut loan: LoanDetails = e.storage().instance().get(&AdminDataKey::INVNO(inv_no)).unwrap();
         loan.who.require_auth();
         // Must be approved
         if !loan.approved {
@@ -248,7 +258,7 @@ impl GetFinanced {
         }
 
         // Release fund to the borrower
-        transfer(&e, get_usdc(&e), loan.who, loan.loan_amount);
+        transfer(&e, get_usdc(&e), loan.who.clone(), loan.loan_amount.clone());
         loan.released = true;
 
         // Update loan details and total loan amount
@@ -256,12 +266,12 @@ impl GetFinanced {
         put_total_loan_amount(&e, get_total_loan_amount(&e) + loan.loan_amount);
         put_total_outstanding_loan(&e, get_total_outstanding_loan(&e) + loan.loan_amount);
 
-        env.events()
-            .publish((AdminDataKey::INVNO(inv_no), symbol_short!("loan_released")), loan);
+        e.events()
+            .publish((AdminDataKey::INVNO(inv_no), Symbol::new(&e, "loan_released")), loan);
     }
 
     fn repay_loan(e: Env, inv_no: u32) {
-        let mut loan = e.storage().instance().get(&AdminDataKey::INVNO(inv_no)).unwrap();
+        let mut loan: LoanDetails = e.storage().instance().get(&AdminDataKey::INVNO(inv_no)).unwrap();
         loan.who.require_auth();
         // Must be released loan and repayment date reached
         if !loan.released && loan.repayment_date < e.ledger().timestamp() {
