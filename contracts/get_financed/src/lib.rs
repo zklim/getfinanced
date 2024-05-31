@@ -11,16 +11,18 @@ use soroban_sdk::{
 use token::create_contract;
 use crate::admin::{has_administrator, read_administrator, write_administrator};
 
+pub(crate) const FEES_PORTION_FOR_INSURANCE: u32 = 10;
 #[contracttype]
 #[derive(Clone, Copy)]
 #[repr(u32)]
 pub enum DataKey {
     Usdc = 0,
     TokenShare = 1,
-    TotalShares = 2,
-    TotalLoanAmount = 3,
-    TotalOutstandingLoan = 4,
-    FeesEarned = 5,
+    InsuranceAddress = 2,
+    TotalShares = 3,
+    TotalLoanAmount = 4,
+    TotalOutstandingLoan = 5,
+    FeesEarned = 6,
 }
 
 #[contracttype]
@@ -47,8 +49,13 @@ pub struct LoanDetails {
 fn get_usdc(e: &Env) -> Address {
     e.storage().instance().get(&DataKey::Usdc).unwrap()
 }
+
 fn get_token_share(e: &Env) -> Address {
     e.storage().instance().get(&DataKey::TokenShare).unwrap()
+}
+
+fn get_insurance_address(e: &Env) -> Address {
+    e.storage().instance().get(&DataKey::InsuranceAddress).unwrap()
 }
 
 fn get_total_shares(e: &Env) -> i128 {
@@ -85,6 +92,10 @@ fn put_token_usdc(e: &Env, contract: Address) {
 
 fn put_token_share(e: &Env, contract: Address) {
     e.storage().instance().set(&DataKey::TokenShare, &contract);
+}
+
+fn put_insurance_address(e: &Env, contract: Address) {
+    e.storage().instance().set(&DataKey::InsuranceAddress, &contract);
 }
 
 fn put_total_shares(e: &Env, amount: i128) {
@@ -129,7 +140,7 @@ struct GetFinanced;
 
 #[contractimpl]
 impl GetFinanced {
-    fn initialize(e: Env, token_wasm_hash: BytesN<32>, usdc: Address, admin: Address) {
+    fn initialize(e: Env, token_wasm_hash: BytesN<32>, usdc: Address, admin: Address, insurance: Address) {
         let share_contract = create_contract(&e, token_wasm_hash, &usdc);
         token::Client::new(&e, &share_contract).initialize(
             &e.current_contract_address(),
@@ -141,9 +152,11 @@ impl GetFinanced {
         write_administrator(&e, &admin);
         put_token_usdc(&e, usdc);
         put_token_share(&e, share_contract);
+        put_insurance_address(&e, insurance);
         put_total_shares(&e, 0);
     }
 
+    // Deposit and get shares
     fn deposit(e: Env, from: Address, amount: i128) {
         // Depositor needs to authorize the deposit
         from.require_auth();
@@ -163,6 +176,7 @@ impl GetFinanced {
         }
     }
 
+    // Withdraw based on shares amount
     fn withdraw(e: Env, to: Address, share_amount: i128) {
         to.require_auth();
 
@@ -249,7 +263,7 @@ impl GetFinanced {
     fn repay_loan(e: Env, inv_no: u32) {
         let mut loan = e.storage().instance().get(&AdminDataKey::INVNO(inv_no)).unwrap();
         loan.who.require_auth();
-        // Must be released
+        // Must be released loan and repayment date reached
         if !loan.released && loan.repayment_date < e.ledger().timestamp() {
             panic!("loan not released or repayment date not reached");
         }
@@ -265,10 +279,12 @@ impl GetFinanced {
         // Update total outstanding loan amount
         put_total_outstanding_loan(&e, get_total_outstanding_loan(&e) - loan.loan_amount);
 
-        // Update fees earned
+        // Update fees earned and transfer portion to insurance
         let fees_earned = get_fees_earned(&e);
-        let fee = loan.invoice_amount - loan.loan_amount;
+        let fee = (loan.invoice_amount - loan.loan_amount) * (100 - FEES_PORTION_FOR_INSURANCE) / 100;
         put_fees_earned(&e, fees_earned + fee);
+        let fees_to_insurance = (loan.invoice_amount - loan.loan_amount) - fee;
+        usdc_client.transfer(&e.current_contract_address(), &get_insurance_address(&e), &fees_to_insurance);
     }
 
     fn get_usdc_address(e: Env) -> Address {
