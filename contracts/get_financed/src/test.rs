@@ -5,8 +5,8 @@ use crate::{token, GetFinanced, GetFinancedClient};
 
 use soroban_sdk::{
     symbol_short,
-    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation},
-    Address, BytesN, Env, IntoVal,
+    testutils::{Address as _, AuthorizedFunction, AuthorizedInvocation, Ledger},
+    Address, BytesN, Env, IntoVal
 };
 
 fn create_token_contract<'a>(e: &Env, admin: &Address) -> token::Client<'a> {
@@ -17,9 +17,11 @@ fn create_getfinanced_contract<'a>(
     e: &Env,
     token_wasm_hash: &BytesN<32>,
     usdc: &Address,
+    admin: &Address,
+    insurance: &Address,
 ) -> GetFinancedClient<'a> {
-    let getfin = GetFinancedClient::new(e, &e.register_contract(None, GetFinanced {}));
-    getfin.initialize(token_wasm_hash, usdc);
+    let getfin = GetFinancedClient::new(e, &e.register_contract(None, GetFinanced));
+    getfin.initialize(token_wasm_hash, usdc, admin, insurance);
     getfin
 }
 
@@ -31,205 +33,350 @@ fn install_token_wasm(e: &Env) -> BytesN<32> {
 }
 
 #[test]
-fn test() {
+fn test_deposit() {
     let e = Env::default();
     e.mock_all_auths();
 
-    let mut admin1 = Address::generate(&e);
-    let mut admin2 = Address::generate(&e);
+    let mut admin = Address::generate(&e);
+    let insurance = Address::generate(&e);
+    let depositor = Address::generate(&e);
+    let borrower = Address::generate(&e);
 
-    let mut token1 = create_token_contract(&e, &admin1);
-    let mut token2 = create_token_contract(&e, &admin2);
-    if &token2.address < &token1.address {
-        std::mem::swap(&mut token1, &mut token2);
-        std::mem::swap(&mut admin1, &mut admin2);
-    }
-    let user1 = Address::generate(&e);
-    let liqpool = create_liqpool_contract(
+    let mut usdc = create_token_contract(&e, &admin);
+
+    let getfin = create_getfinanced_contract(
         &e,
         &install_token_wasm(&e),
-        &token1.address,
-        &token2.address,
+        &usdc.address,
+        &admin,
+        &insurance,
     );
 
-    let token_share = token::Client::new(&e, &liqpool.share_id());
+    let token_share = token::Client::new(&e, &getfin.share_id());
 
-    token1.mint(&user1, &1000);
-    assert_eq!(token1.balance(&user1), 1000);
+    usdc.mint(&depositor, &1000);
+    // Balance before
+    assert_eq!(usdc.balance(&depositor), 1000);
+    assert_eq!(usdc.balance(&getfin.address), 0);
 
-    token2.mint(&user1, &1000);
-    assert_eq!(token2.balance(&user1), 1000);
+    getfin.deposit(&depositor, &1000);
 
-    liqpool.deposit(&user1, &100, &100, &100, &100);
-    assert_eq!(
-        e.auths(),
-        std::vec![(
-            user1.clone(),
-            AuthorizedInvocation {
-                function: AuthorizedFunction::Contract((
-                    liqpool.address.clone(),
-                    symbol_short!("deposit"),
-                    (&user1, 100_i128, 100_i128, 100_i128, 100_i128).into_val(&e)
-                )),
-                sub_invocations: std::vec![
-                    AuthorizedInvocation {
-                        function: AuthorizedFunction::Contract((
-                            token1.address.clone(),
-                            symbol_short!("transfer"),
-                            (&user1, &liqpool.address, 100_i128).into_val(&e)
-                        )),
-                        sub_invocations: std::vec![]
-                    },
-                    AuthorizedInvocation {
-                        function: AuthorizedFunction::Contract((
-                            token2.address.clone(),
-                            symbol_short!("transfer"),
-                            (&user1, &liqpool.address, 100_i128).into_val(&e)
-                        )),
-                        sub_invocations: std::vec![]
-                    }
-                ]
-            }
-        )]
+    // Balance after
+    assert_eq!(token_share.balance(&depositor), 1000);
+    assert_eq!(usdc.balance(&depositor), 0);
+    assert_eq!(usdc.balance(&getfin.address), 1000);
+}
+
+#[test]
+fn test_withdraw() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let mut admin = Address::generate(&e);
+    let insurance = Address::generate(&e);
+    let depositor = Address::generate(&e);
+    let depositor2 = Address::generate(&e);
+
+    let mut usdc = create_token_contract(&e, &admin);
+
+    let getfin = create_getfinanced_contract(
+        &e,
+        &install_token_wasm(&e),
+        &usdc.address,
+        &admin,
+        &insurance,
     );
 
-    assert_eq!(token_share.balance(&user1), 100);
-    assert_eq!(token_share.balance(&liqpool.address), 0);
-    assert_eq!(token1.balance(&user1), 900);
-    assert_eq!(token1.balance(&liqpool.address), 100);
-    assert_eq!(token2.balance(&user1), 900);
-    assert_eq!(token2.balance(&liqpool.address), 100);
+    let token_share = token::Client::new(&e, &getfin.share_id());
 
-    liqpool.swap(&user1, &false, &49, &100);
-    assert_eq!(
-        e.auths(),
-        std::vec![(
-            user1.clone(),
-            AuthorizedInvocation {
-                function: AuthorizedFunction::Contract((
-                    liqpool.address.clone(),
-                    symbol_short!("swap"),
-                    (&user1, false, 49_i128, 100_i128).into_val(&e)
-                )),
-                sub_invocations: std::vec![AuthorizedInvocation {
-                    function: AuthorizedFunction::Contract((
-                        token1.address.clone(),
-                        symbol_short!("transfer"),
-                        (&user1, &liqpool.address, 97_i128).into_val(&e)
-                    )),
-                    sub_invocations: std::vec![]
-                }]
-            }
-        )]
-    );
+    usdc.mint(&depositor, &1000);
+    getfin.deposit(&depositor, &1000);
+    usdc.mint(&depositor2, &200);
+    getfin.deposit(&depositor2, &200);
 
-    assert_eq!(token1.balance(&user1), 803);
-    assert_eq!(token1.balance(&liqpool.address), 197);
-    assert_eq!(token2.balance(&user1), 949);
-    assert_eq!(token2.balance(&liqpool.address), 51);
+    // Withdraw
+    getfin.withdraw(&depositor, &500);
 
-    e.budget().reset_unlimited();
-    liqpool.withdraw(&user1, &100, &197, &51);
-
-    assert_eq!(
-        e.auths(),
-        std::vec![(
-            user1.clone(),
-            AuthorizedInvocation {
-                function: AuthorizedFunction::Contract((
-                    liqpool.address.clone(),
-                    symbol_short!("withdraw"),
-                    (&user1, 100_i128, 197_i128, 51_i128).into_val(&e)
-                )),
-                sub_invocations: std::vec![AuthorizedInvocation {
-                    function: AuthorizedFunction::Contract((
-                        token_share.address.clone(),
-                        symbol_short!("transfer"),
-                        (&user1, &liqpool.address, 100_i128).into_val(&e)
-                    )),
-                    sub_invocations: std::vec![]
-                }]
-            }
-        )]
-    );
-
-    assert_eq!(token1.balance(&user1), 1000);
-    assert_eq!(token2.balance(&user1), 1000);
-    assert_eq!(token_share.balance(&user1), 0);
-    assert_eq!(token1.balance(&liqpool.address), 0);
-    assert_eq!(token2.balance(&liqpool.address), 0);
-    assert_eq!(token_share.balance(&liqpool.address), 0);
+    // Check balance
+    assert_eq!(token_share.balance(&depositor), 500);
+    assert_eq!(usdc.balance(&depositor), 500);
 }
 
 #[test]
 #[should_panic]
-fn deposit_amount_zero_should_panic() {
+fn test_request_loan_not_whitelisted() {
     let e = Env::default();
     e.mock_all_auths();
 
-    // Create contracts
-    let mut admin1 = Address::generate(&e);
-    let mut admin2 = Address::generate(&e);
+    let mut admin = Address::generate(&e);
+    let insurance = Address::generate(&e);
+    let depositor = Address::generate(&e);
+    let borrower = Address::generate(&e);
 
-    let mut token_a = create_token_contract(&e, &admin1);
-    let mut token_b = create_token_contract(&e, &admin2);
-    if &token_b.address < &token_a.address {
-        std::mem::swap(&mut token_a, &mut token_b);
-        std::mem::swap(&mut admin1, &mut admin2);
-    }
-    let liqpool = create_liqpool_contract(
+    let mut usdc = create_token_contract(&e, &admin);
+
+    let getfin = create_getfinanced_contract(
         &e,
         &install_token_wasm(&e),
-        &token_a.address,
-        &token_b.address,
+        &usdc.address,
+        &admin,
+        &insurance,
     );
 
-    // Create a user
-    let user1 = Address::generate(&e);
+    let token_share = token::Client::new(&e, &getfin.share_id());
 
-    token_a.mint(&user1, &1000);
-    assert_eq!(token_a.balance(&user1), 1000);
+    usdc.mint(&depositor, &1000);
+    getfin.deposit(&depositor, &1000);
 
-    token_b.mint(&user1, &1000);
-    assert_eq!(token_b.balance(&user1), 1000);
+    getfin.request_loan(&borrower, &800, &231u32, &1745156);
+}
 
-    liqpool.deposit(&user1, &1, &0, &0, &0);
+#[test]
+fn test_request_loan() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let mut admin = Address::generate(&e);
+    let insurance = Address::generate(&e);
+    let depositor = Address::generate(&e);
+    let borrower = Address::generate(&e);
+
+    let mut usdc = create_token_contract(&e, &admin);
+
+    let getfin = create_getfinanced_contract(
+        &e,
+        &install_token_wasm(&e),
+        &usdc.address,
+        &admin,
+        &insurance,
+    );
+
+    let token_share = token::Client::new(&e, &getfin.share_id());
+
+    usdc.mint(&depositor, &1000);
+    getfin.deposit(&depositor, &1000);
+
+    getfin.whitelist(&borrower);
+    getfin.request_loan(&borrower, &800, &231u32, &1745156);
+}
+
+#[test]
+fn test_approve_loan() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let mut admin = Address::generate(&e);
+    let insurance = Address::generate(&e);
+    let depositor = Address::generate(&e);
+    let borrower = Address::generate(&e);
+
+    let mut usdc = create_token_contract(&e, &admin);
+
+    let getfin = create_getfinanced_contract(
+        &e,
+        &install_token_wasm(&e),
+        &usdc.address,
+        &admin,
+        &insurance,
+    );
+
+    let token_share = token::Client::new(&e, &getfin.share_id());
+
+    usdc.mint(&depositor, &1000);
+    getfin.deposit(&depositor, &1000);
+
+    getfin.whitelist(&borrower);
+    getfin.request_loan(&borrower, &800, &231u32, &1745156);
+    getfin.approve_loan(&231u32, &10i128);
 }
 
 #[test]
 #[should_panic]
-fn swap_reserve_one_nonzero_other_zero() {
+fn test_approve_loan_bad_fee_rate() {
     let e = Env::default();
     e.mock_all_auths();
 
-    // Create contracts
-    let mut admin1 = Address::generate(&e);
-    let mut admin2 = Address::generate(&e);
+    let mut admin = Address::generate(&e);
+    let insurance = Address::generate(&e);
+    let depositor = Address::generate(&e);
+    let borrower = Address::generate(&e);
 
-    let mut token_a = create_token_contract(&e, &admin1);
-    let mut token_b = create_token_contract(&e, &admin2);
-    if &token_b.address < &token_a.address {
-        std::mem::swap(&mut token_a, &mut token_b);
-        std::mem::swap(&mut admin1, &mut admin2);
-    }
-    let liqpool = create_liqpool_contract(
+    let mut usdc = create_token_contract(&e, &admin);
+
+    let getfin = create_getfinanced_contract(
         &e,
         &install_token_wasm(&e),
-        &token_a.address,
-        &token_b.address,
+        &usdc.address,
+        &admin,
+        &insurance,
     );
 
-    // Create a user
-    let user1 = Address::generate(&e);
+    let token_share = token::Client::new(&e, &getfin.share_id());
 
-    token_a.mint(&user1, &1000);
-    assert_eq!(token_a.balance(&user1), 1000);
+    usdc.mint(&depositor, &1000);
+    getfin.deposit(&depositor, &1000);
 
-    token_b.mint(&user1, &1000);
-    assert_eq!(token_b.balance(&user1), 1000);
+    getfin.whitelist(&borrower);
+    getfin.request_loan(&borrower, &800, &231u32, &1745156);
+    getfin.approve_loan(&231u32, &101i128);
+}
 
-    // Try to get to a situation where the reserves are 1 and 0.
-    // It shouldn't be possible.
-    token_b.transfer(&user1, &liqpool.address, &1);
-    liqpool.swap(&user1, &false, &1, &1);
+#[test]
+fn test_claim_loan() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let mut admin = Address::generate(&e);
+    let insurance = Address::generate(&e);
+    let depositor = Address::generate(&e);
+    let borrower = Address::generate(&e);
+
+    let mut usdc = create_token_contract(&e, &admin);
+
+    let getfin = create_getfinanced_contract(
+        &e,
+        &install_token_wasm(&e),
+        &usdc.address,
+        &admin,
+        &insurance,
+    );
+
+    let token_share = token::Client::new(&e, &getfin.share_id());
+
+    usdc.mint(&depositor, &1000);
+    getfin.deposit(&depositor, &1000);
+
+    getfin.whitelist(&borrower);
+    getfin.request_loan(&borrower, &800, &231u32, &1745156);
+    getfin.approve_loan(&231u32, &10i128);
+    getfin.claim_loan(&231u32);
+
+    let amount_after_fee: i128 = 800 * 90/ 100;
+    assert_eq!(usdc.balance(&borrower), amount_after_fee);
+}
+
+#[test]
+#[should_panic]
+fn test_repay_loan_not_time_yet() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let mut admin = Address::generate(&e);
+    let insurance = Address::generate(&e);
+    let depositor = Address::generate(&e);
+    let borrower = Address::generate(&e);
+
+    let mut usdc = create_token_contract(&e, &admin);
+
+    let getfin = create_getfinanced_contract(
+        &e,
+        &install_token_wasm(&e),
+        &usdc.address,
+        &admin,
+        &insurance,
+    );
+
+    let token_share = token::Client::new(&e, &getfin.share_id());
+
+    usdc.mint(&depositor, &1000);
+    getfin.deposit(&depositor, &1000);
+
+    getfin.whitelist(&borrower);
+    getfin.request_loan(&borrower, &800, &231u32, &1745156);
+    getfin.approve_loan(&231u32, &10i128);
+    getfin.claim_loan(&231u32);
+    getfin.repay_loan(&231u32);
+}
+
+#[test]
+fn test_repay_loan() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let mut admin = Address::generate(&e);
+    let insurance = Address::generate(&e);
+    let depositor = Address::generate(&e);
+    let borrower = Address::generate(&e);
+
+    let mut usdc = create_token_contract(&e, &admin);
+
+    let getfin = create_getfinanced_contract(
+        &e,
+        &install_token_wasm(&e),
+        &usdc.address,
+        &admin,
+        &insurance,
+    );
+
+    let token_share = token::Client::new(&e, &getfin.share_id());
+
+    usdc.mint(&depositor, &1000);
+    getfin.deposit(&depositor, &1000);
+
+    getfin.whitelist(&borrower);
+    getfin.request_loan(&borrower, &800, &231u32, &1745156);
+    getfin.approve_loan(&231u32, &10i128);
+    getfin.claim_loan(&231u32);
+    let amount_after_fee: i128 = 800 * 90/ 100; // same to loan.loan_amount
+    assert_eq!(usdc.balance(&borrower), amount_after_fee);
+
+    // Advance the time
+    e.ledger().with_mut(|li| {
+        li.timestamp = 1745156 + 1;
+    });
+
+    // Check repayment and portion that goes to insurance
+    let loan = getfin.get_loan_details(&231u32);
+    let fees = loan.invoice_amount - loan.loan_amount;
+    usdc.mint(&borrower, &fees); // mint back the fees
+    let (_, insurance_fee) = getfin.repay_loan(&231u32);
+    assert_eq!(usdc.balance(&borrower), 0);
+    assert_eq!(usdc.balance(&getfin.address), 1000 + fees - insurance_fee);
+    assert_eq!(getfin.get_fees_earned(), fees - insurance_fee);
+}
+
+#[test]
+fn test_withdraw_with_fees_earned() {
+    let e = Env::default();
+    e.mock_all_auths();
+
+    let mut admin = Address::generate(&e);
+    let insurance = Address::generate(&e);
+    let depositor = Address::generate(&e);
+    let borrower = Address::generate(&e);
+
+    let mut usdc = create_token_contract(&e, &admin);
+
+    let getfin = create_getfinanced_contract(
+        &e,
+        &install_token_wasm(&e),
+        &usdc.address,
+        &admin,
+        &insurance,
+    );
+
+    let token_share = token::Client::new(&e, &getfin.share_id());
+
+    usdc.mint(&depositor, &1000);
+    getfin.deposit(&depositor, &1000);
+
+    getfin.whitelist(&borrower);
+    getfin.request_loan(&borrower, &800, &231u32, &1745156);
+    getfin.approve_loan(&231u32, &10i128);
+    getfin.claim_loan(&231u32);
+
+    // Advance the time
+    e.ledger().with_mut(|li| {
+        li.timestamp = 1745156 + 1;
+    });
+
+    // Check repayment and portion that goes to insurance
+    let loan = getfin.get_loan_details(&231u32);
+    let fees = loan.invoice_amount - loan.loan_amount;
+    usdc.mint(&borrower, &fees); // mint back the fees
+    let (_, insurance_fee) = getfin.repay_loan(&231u32);
+
+    // Check withdrawal with earnings
+    getfin.withdraw(&depositor, &1000);
+    assert_eq!(usdc.balance(&depositor), 1000 + fees - insurance_fee);
 }

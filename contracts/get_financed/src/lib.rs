@@ -145,17 +145,17 @@ fn transfer(e: &Env, token: Address, to: Address, amount: i128) {
 }
 
 #[contract]
-struct GetFinanced;
+pub struct GetFinanced;
 
 #[contractimpl]
 impl GetFinanced {
-    fn initialize(e: Env, token_wasm_hash: BytesN<32>, usdc: Address, admin: Address, insurance: Address) {
+    pub fn initialize(e: Env, token_wasm_hash: BytesN<32>, usdc: Address, admin: Address, insurance: Address) {
         let share_contract = create_contract(&e, token_wasm_hash, &usdc);
         token::Client::new(&e, &share_contract).initialize(
             &e.current_contract_address(),
             &7u32,
-            &"GF Yield-bearing USDC".into_val(&e),
-            &"gfUSDC".into_val(&e),
+            &"Get Financed Shares".into_val(&e),
+            &"GFS".into_val(&e),
         );
 
         write_administrator(&e, &admin);
@@ -166,27 +166,27 @@ impl GetFinanced {
     }
 
     // Deposit and get shares
-    fn deposit(e: Env, from: Address, amount: i128) {
+    pub fn deposit(e: Env, from: Address, amount: i128) {
         // Depositor needs to authorize the deposit
         from.require_auth();
-
-        // Transfer the amount to the contract
-        let usdc_client = token::Client::new(&e, &get_usdc(&e));
-        usdc_client.transfer(&from, &e.current_contract_address(), &amount);
 
         // Now calculate how many new pool shares to mint
         let balance_usdc = get_balance_usdc(&e);
         if balance_usdc == 0 {
-            mint_shares(&e, from, amount);
+            mint_shares(&e, from.clone(), amount);
         } else {
             let total_shares = get_total_shares(&e);
             let new_shares =  total_shares * amount / balance_usdc;
-            mint_shares(&e, from, new_shares);
+            mint_shares(&e, from.clone(), new_shares);
         }
+
+        // Transfer the amount to the contract
+        let usdc_client = token::Client::new(&e, &get_usdc(&e));
+        usdc_client.transfer(&from, &e.current_contract_address(), &amount);
     }
 
     // Withdraw based on shares amount
-    fn withdraw(e: Env, to: Address, share_amount: i128) {
+    pub fn withdraw(e: Env, to: Address, share_amount: i128) {
         to.require_auth();
 
         // First transfer the pool shares that need to be redeemed
@@ -200,30 +200,30 @@ impl GetFinanced {
         // Now calculate the withdraw amounts
         let withdraw = (balance_usdc * balance_shares) / total_shares;
 
-        burn_shares(&e, balance_shares);
+        burn_shares(&e, share_amount);
         transfer(&e, get_usdc(&e), to, withdraw);
     }
 
     // Whitelist borrower's address after their to be able to request financing
-    fn whitelist(e: Env, address: Address) {
+    pub fn whitelist(e: Env, address: Address) {
         read_administrator(&e).require_auth();
         e.storage().instance().set(&AdminDataKey::WHITELISTED(address), &true);
     }
 
-    fn request_loan(e: Env, from: Address, invoice_amount: i128, inv_no: u32, fee_rate: i128, repayment_date: u64) {
+    pub fn request_loan(e: Env, who: Address, invoice_amount: i128, inv_no: u32, repayment_date: u64) {
         // Borrower needs to authorize the loan request
-        from.require_auth();
+        who.require_auth();
         // Check if the borrower is whitelisted
-        let whitelist: bool = e.storage().instance().get(&AdminDataKey::WHITELISTED(from.clone())).unwrap();
+        let whitelist: bool = e.storage().instance().get(&AdminDataKey::WHITELISTED(who.clone())).unwrap();
         if !whitelist {
             panic!("borrower is not whitelisted");
         }
 
         let loan = LoanDetails {
-            who: from,
-            fee_rate,
+            who,
+            fee_rate: 0,
             invoice_amount,
-            loan_amount: invoice_amount * (100 - fee_rate) / 100,
+            loan_amount: 0,
             repayment_date,
             approved: false,
             released: false,
@@ -236,12 +236,18 @@ impl GetFinanced {
             .publish((AdminDataKey::INVNO(inv_no), Symbol::new(&e, "loan_request")), loan);
     }
 
-    fn approve_loan(e: Env, inv_no: u32) {
+    pub fn approve_loan(e: Env, inv_no: u32, fee_rate: i128) {
         let admin = read_administrator(&e);
         admin.require_auth();
 
+        if fee_rate > 100 {
+            panic!("fee rate cannot be more than 100%");
+        }
+
         let mut loan: LoanDetails = e.storage().instance().get(&AdminDataKey::INVNO(inv_no)).unwrap();
         loan.approved = true;
+        loan.fee_rate = fee_rate;
+        loan.loan_amount = loan.invoice_amount * (100 - fee_rate) / 100;
 
         e.storage().instance().set(&AdminDataKey::INVNO(inv_no), &loan);
 
@@ -249,7 +255,7 @@ impl GetFinanced {
             .publish((AdminDataKey::INVNO(inv_no), Symbol::new(&e, "loan_approved")), loan);
     }
 
-    fn release_loan(e: Env, inv_no: u32) {
+    pub fn claim_loan(e: Env, inv_no: u32) {
         let mut loan: LoanDetails = e.storage().instance().get(&AdminDataKey::INVNO(inv_no)).unwrap();
         loan.who.require_auth();
         // Must be approved
@@ -270,7 +276,8 @@ impl GetFinanced {
             .publish((AdminDataKey::INVNO(inv_no), Symbol::new(&e, "loan_released")), loan);
     }
 
-    fn repay_loan(e: Env, inv_no: u32) {
+    // Returns amount repaid and fees to insurance
+    pub fn repay_loan(e: Env, inv_no: u32) -> (i128, i128) {
         let mut loan: LoanDetails = e.storage().instance().get(&AdminDataKey::INVNO(inv_no)).unwrap();
         loan.who.require_auth();
         // Must be released loan and repayment date reached
@@ -295,17 +302,34 @@ impl GetFinanced {
         put_fees_earned(&e, fees_earned + fee);
         let fees_to_insurance = (loan.invoice_amount - loan.loan_amount) - fee;
         usdc_client.transfer(&e.current_contract_address(), &get_insurance_address(&e), &fees_to_insurance);
+        (loan.invoice_amount, fees_to_insurance)
     }
 
-    fn get_usdc_address(e: Env) -> Address {
+    pub fn get_usdc_address(e: Env) -> Address {
         get_usdc(&e)
     }
 
-    fn get_share_token_address(e: Env) -> Address {
+    pub fn share_id(e: Env) -> Address {
         get_token_share(&e)
     }
 
-    fn get_shares(e: Env) -> i128 {
+    pub fn get_shares(e: Env) -> i128 {
         get_total_shares(&e)
+    }
+
+    pub fn get_loan_details(e: Env, inv_no: u32) -> LoanDetails {
+        e.storage().instance().get(&AdminDataKey::INVNO(inv_no)).unwrap()
+    }
+
+    pub fn get_insurance_fee_rate(e: Env) -> i128 {
+        FEES_PORTION_FOR_INSURANCE
+    }
+
+    pub fn get_insurance_address(e: Env) -> Address {
+        get_insurance_address(&e)
+    }
+
+    pub fn get_fees_earned(e: Env) -> i128 {
+        get_fees_earned(&e)
     }
 }
