@@ -1,6 +1,6 @@
 dev_dependencies = { soroban-sdk = { workspace = true } }
 [package]
-name = "get-financed-contract"
+name = "lumen-finance-contract"
 version = "0.0.0"
 edition = "2021"
 publish = false
@@ -9,8 +9,9 @@ publish = false
 crate-type = ["cdylib"]
 
 [dependencies]
-soroban-sdk = { workspace = true }
+soroban-sdk = "21.0.1-preview.3"
+soroban-token-sdk = "21.0.1-preview.3"
 num-integer = { version = "0.1.45", default-features = false, features = ["i128"] }
 
 [dev-dependencies]
-soroban-sdk = { version = "20.3.1", features = ["testutils"] }
+soroban-sdk = { version = "21.0.1-preview.3", features = ["testutils"] }

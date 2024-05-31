@@ -145,10 +145,10 @@ fn transfer(e: &Env, token: Address, to: Address, amount: i128) {
 }
 
 #[contract]
-pub struct GetFinanced;
+pub struct LumenFinance;
 
 #[contractimpl]
-impl GetFinanced {
+impl LumenFinance {
     pub fn initialize(e: Env, token_wasm_hash: BytesN<32>, usdc: Address, admin: Address, insurance: Address) {
         let share_contract = create_contract(&e, token_wasm_hash, &usdc);
         token::Client::new(&e, &share_contract).initialize(
@@ -315,6 +315,11 @@ impl GetFinanced {
 
     pub fn get_shares(e: Env) -> i128 {
         get_total_shares(&e)
+    }
+
+    pub fn get_user_share_balance(e: Env, who: Address) -> i128 {
+        let balance = token::Client::new(&e, &get_token_share(&e)).balance(&who);
+        balance * get_balance_usdc(&e) / get_total_shares(&e)
     }
 
     pub fn get_loan_details(e: Env, inv_no: u32) -> LoanDetails {
